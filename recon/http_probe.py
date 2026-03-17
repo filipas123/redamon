@@ -730,7 +730,6 @@ def parse_httpx_output(output_file: str, root_domain: str = None, allowed_hosts:
     by_host = {}
     technologies_found = {}
     servers_found = {}
-    status_codes = {}
     filtered_count = 0  # Track URLs filtered out due to domain/host mismatch
     external_domain_entries = []  # Collect out-of-scope domains for situational awareness
 
@@ -782,11 +781,8 @@ def parse_httpx_output(output_file: str, root_domain: str = None, allowed_hosts:
                         })
                     continue
 
-            # Status code tracking
+            # Extract status code (tracking deferred until after by_url dedup)
             status_code = entry.get("status_code") or entry.get("status-code")
-            if status_code:
-                status_str = str(status_code)
-                status_codes[status_str] = status_codes.get(status_str, 0) + 1
 
             # Build URL entry
             url_entry = {
@@ -893,6 +889,14 @@ def parse_httpx_output(output_file: str, root_domain: str = None, allowed_hosts:
         by_host[host]["technologies"] = sorted(list(by_host[host]["technologies"]))
         by_host[host]["servers"] = sorted(list(by_host[host]["servers"]))
         by_host[host]["status_codes"] = sorted(list(by_host[host]["status_codes"]))
+
+    # Build status code counts from deduplicated by_url (not raw httpx lines)
+    status_codes = {}
+    for url_info in by_url.values():
+        sc = url_info.get("status_code")
+        if sc:
+            sc_str = str(sc)
+            status_codes[sc_str] = status_codes.get(sc_str, 0) + 1
 
     # Build summary
     summary = {

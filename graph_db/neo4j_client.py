@@ -272,7 +272,7 @@ class Neo4jClient:
                 result = session.run("RETURN 1 AS test")
                 return result.single()["test"] == 1
         except Exception as e:
-            print(f"[!] Neo4j connection failed: {e}")
+            print(f"[!][graph-db] Neo4j connection failed: {e}")
             return False
 
     def _init_schema(self, session):
@@ -398,7 +398,7 @@ class Neo4jClient:
             except Exception as e:
                 # Ignore if constraint/index already exists
                 if "already exists" not in str(e).lower():
-                    print(f"[!] Schema warning: {e}")
+                    print(f"[!][graph-db] Schema warning: {e}")
 
     def clear_project_data(self, user_id: str, project_id: str) -> dict:
         """
@@ -432,7 +432,7 @@ class Neo4jClient:
             if record:
                 stats["nodes_deleted"] = record["deleted_count"]
 
-            print(f"[*] Cleared project data: {stats['nodes_deleted']} nodes deleted")
+            print(f"[*][graph-db] Cleared project data: {stats['nodes_deleted']} nodes deleted")
 
         return stats
 
@@ -593,7 +593,7 @@ class Neo4jClient:
                      stats["technologies_deleted"] + stats["traceroutes_deleted"] +
                      stats["certificates_deleted"] + stats["exploits_gvm_deleted"] +
                      stats["relationships_deleted"])
-            print(f"[*] Cleared GVM data: {total} items removed, "
+            print(f"[*][graph-db] Cleared GVM data: {total} items removed, "
                   f"{stats['technologies_cleaned']} shared technologies cleaned")
 
         return stats
@@ -710,10 +710,10 @@ class Neo4jClient:
                     name=root_domain, user_id=user_id, project_id=project_id, props=domain_props
                 )
                 stats["domain_created"] = True
-                print(f"[+] Created Domain node: {root_domain}")
+                print(f"[+][graph-db] Created Domain node: {root_domain}")
             except Exception as e:
                 stats["errors"].append(f"Domain creation failed: {e}")
-                print(f"[!] Domain creation failed: {e}")
+                print(f"[!][graph-db] Domain creation failed: {e}")
 
             # 2. Create Subdomain nodes and relationships
             subdomain_dns = dns_data.get("subdomains", {})
@@ -828,15 +828,15 @@ class Neo4jClient:
 
                 except Exception as e:
                     stats["errors"].append(f"Subdomain {subdomain} processing failed: {e}")
-                    print(f"[!] Subdomain {subdomain} processing failed: {e}")
+                    print(f"[!][graph-db] Subdomain {subdomain} processing failed: {e}")
 
-            print(f"[+] Created {stats['subdomains_created']} Subdomain nodes")
-            print(f"[+] Created {stats['ips_created']} IP nodes")
-            print(f"[+] Created {stats['dns_records_created']} DNSRecord nodes")
-            print(f"[+] Created {stats['relationships_created']} relationships")
+            print(f"[+][graph-db] Created {stats['subdomains_created']} Subdomain nodes")
+            print(f"[+][graph-db] Created {stats['ips_created']} IP nodes")
+            print(f"[+][graph-db] Created {stats['dns_records_created']} DNSRecord nodes")
+            print(f"[+][graph-db] Created {stats['relationships_created']} relationships")
 
             if stats["errors"]:
-                print(f"[!] {len(stats['errors'])} errors occurred")
+                print(f"[!][graph-db] {len(stats['errors'])} errors occurred")
 
         return stats
 
@@ -896,10 +896,10 @@ class Neo4jClient:
                     name=mock_domain, user_id=user_id, project_id=project_id, props=domain_props
                 )
                 stats["domain_created"] = True
-                print(f"[+] Created mock Domain node: {mock_domain}")
+                print(f"[+][graph-db] Created mock Domain node: {mock_domain}")
             except Exception as e:
                 stats["errors"].append(f"Domain creation failed: {e}")
-                print(f"[!] Domain creation failed: {e}")
+                print(f"[!][graph-db] Domain creation failed: {e}")
 
             # 2. Create Subdomain nodes, IP nodes, and relationships
             subdomains_dns = dns_data.get("subdomains", {})
@@ -985,15 +985,15 @@ class Neo4jClient:
 
                 except Exception as e:
                     stats["errors"].append(f"Subdomain {subdomain_name}: {e}")
-                    print(f"[!] Error processing {subdomain_name}: {e}")
+                    print(f"[!][graph-db] Error processing {subdomain_name}: {e}")
 
-            print(f"[+] IP Recon graph update complete:")
-            print(f"[+] Created {stats['subdomains_created']} Subdomain nodes")
-            print(f"[+] Created {stats['ips_created']} IP nodes")
-            print(f"[+] Created {stats['relationships_created']} relationships")
+            print(f"[+][graph-db] IP Recon graph update complete:")
+            print(f"[+][graph-db] Created {stats['subdomains_created']} Subdomain nodes")
+            print(f"[+][graph-db] Created {stats['ips_created']} IP nodes")
+            print(f"[+][graph-db] Created {stats['relationships_created']} relationships")
 
             if stats["errors"]:
-                print(f"[!] {len(stats['errors'])} errors occurred")
+                print(f"[!][graph-db] {len(stats['errors'])} errors occurred")
 
         return stats
 
@@ -1037,8 +1037,17 @@ class Neo4jClient:
             by_host = port_scan_data.get("by_host", {})
 
             # Process by_ip data - this gives us IP -> ports mapping
+            # Only update IPs that already exist in the graph (from DNS) or have open ports.
+            # Skip IPs with no ports and no hostnames to avoid orphaned nodes.
             for ip_addr, ip_info in by_ip.items():
                 try:
+                    ports = ip_info.get("ports", [])
+                    hostnames = ip_info.get("hostnames", [])
+
+                    # Skip IPs that have no open ports and no hostname associations
+                    if not ports and not hostnames:
+                        continue
+
                     # Update IP node with CDN info if available
                     cdn_name = ip_info.get("cdn")
                     is_cdn = ip_info.get("is_cdn", False)
@@ -1168,13 +1177,13 @@ class Neo4jClient:
                 except Exception as e:
                     stats["errors"].append(f"Domain update failed: {e}")
 
-            print(f"[+] Updated {stats['ips_updated']} IP nodes with CDN info")
-            print(f"[+] Created {stats['ports_created']} Port nodes")
-            print(f"[+] Created {stats['services_created']} Service nodes")
-            print(f"[+] Created {stats['relationships_created']} relationships")
+            print(f"[+][graph-db] Updated {stats['ips_updated']} IP nodes with CDN info")
+            print(f"[+][graph-db] Created {stats['ports_created']} Port nodes")
+            print(f"[+][graph-db] Created {stats['services_created']} Service nodes")
+            print(f"[+][graph-db] Created {stats['relationships_created']} relationships")
 
             if stats["errors"]:
-                print(f"[!] {len(stats['errors'])} errors occurred")
+                print(f"[!][graph-db] {len(stats['errors'])} errors occurred")
 
         return stats
 
@@ -1633,14 +1642,14 @@ class Neo4jClient:
                 except Exception as e:
                     stats["errors"].append(f"Domain update failed: {e}")
 
-            print(f"[+] Created {stats['baseurls_created']} BaseURL nodes")
-            print(f"[+] Created/Updated {stats['services_created']} Service nodes")
-            print(f"[+] Created {stats['technologies_created']} Technology nodes")
-            print(f"[+] Created {stats['headers_created']} Header nodes")
-            print(f"[+] Created {stats['relationships_created']} relationships")
+            print(f"[+][graph-db] Created {stats['baseurls_created']} BaseURL nodes")
+            print(f"[+][graph-db] Created/Updated {stats['services_created']} Service nodes")
+            print(f"[+][graph-db] Created {stats['technologies_created']} Technology nodes")
+            print(f"[+][graph-db] Created {stats['headers_created']} Header nodes")
+            print(f"[+][graph-db] Created {stats['relationships_created']} relationships")
 
             if stats["errors"]:
-                print(f"[!] {len(stats['errors'])} errors occurred")
+                print(f"[!][graph-db] {len(stats['errors'])} errors occurred")
 
         return stats
 
@@ -1964,7 +1973,8 @@ class Neo4jClient:
                                     MERGE (e)-[:HAS_PARAMETER]->(p)
                                     """,
                                     path=path, method=method, baseurl=base_url,
-                                    param_name=param_name, position="query"
+                                    param_name=param_name, position="query",
+                                    user_id=user_id, project_id=project_id
                                 )
                                 stats["relationships_created"] += 1
 
@@ -2129,7 +2139,8 @@ class Neo4jClient:
                             MATCH (e:Endpoint {path: $path, method: $method, baseurl: $baseurl, user_id: $user_id, project_id: $project_id})
                             MERGE (v)-[:FOUND_AT]->(e)
                             """,
-                            vuln_id=vuln_id, path=vuln_path, method=fuzzing_method, baseurl=vuln_base_url
+                            vuln_id=vuln_id, path=vuln_path, method=fuzzing_method, baseurl=vuln_base_url,
+                            user_id=user_id, project_id=project_id
                         )
                         stats["relationships_created"] += 1
 
@@ -2165,7 +2176,8 @@ class Neo4jClient:
                                     MERGE (e)-[:HAS_PARAMETER]->(p)
                                     """,
                                     path=vuln_path, method=fuzzing_method, baseurl=vuln_base_url,
-                                    param_name=fuzzing_param, position=fuzzing_position
+                                    param_name=fuzzing_param, position=fuzzing_position,
+                                    user_id=user_id, project_id=project_id
                                 )
                                 stats["relationships_created"] += 1
 
@@ -2177,7 +2189,8 @@ class Neo4jClient:
                                 MERGE (v)-[:AFFECTS_PARAMETER]->(p)
                                 """,
                                 vuln_id=vuln_id, param_name=fuzzing_param, position=fuzzing_position,
-                                path=vuln_path, baseurl=vuln_base_url
+                                path=vuln_path, baseurl=vuln_base_url,
+                                user_id=user_id, project_id=project_id
                             )
                             stats["relationships_created"] += 1
 
@@ -2219,6 +2232,8 @@ class Neo4jClient:
                         # Create CVE node with all properties
                         cve_props = {
                             "id": cve_id,
+                            "cve_id": cve_id,
+                            "name": cve_id,
                             "user_id": user_id,
                             "project_id": project_id,
                             "cvss": cve.get("cvss"),
@@ -2327,12 +2342,12 @@ class Neo4jClient:
                         stats["errors"].append(f"CVE {cve.get('id', 'unknown')} processing failed: {e}")
 
             if cves_created > 0:
-                print(f"[+] Created {cves_created} CVE nodes")
-                print(f"[+] Created {cve_relationships_created} Technology-CVE relationships")
+                print(f"[+][graph-db] Created {cves_created} CVE nodes")
+                print(f"[+][graph-db] Created {cve_relationships_created} Technology-CVE relationships")
             if mitre_stats["nodes"] > 0:
-                print(f"[+] Created {mitre_stats['nodes']} MitreData (CWE) nodes")
+                print(f"[+][graph-db] Created {mitre_stats['nodes']} MitreData (CWE) nodes")
             if mitre_stats["capec"] > 0:
-                print(f"[+] Created {mitre_stats['capec']} Capec nodes")
+                print(f"[+][graph-db] Created {mitre_stats['capec']} Capec nodes")
 
             # =========================================================================
             # Process security_checks - Direct IP access, WAF bypass, etc.
@@ -2457,9 +2472,9 @@ class Neo4jClient:
                         stats["errors"].append(f"Security check {check_type} failed: {e}")
 
             if security_checks_created > 0:
-                print(f"[+] Created {security_checks_created} security check Vulnerability nodes")
+                print(f"[+][graph-db] Created {security_checks_created} security check Vulnerability nodes")
             if waf_bypass_rels > 0:
-                print(f"[+] Created {waf_bypass_rels} WAF_BYPASS_VIA relationships")
+                print(f"[+][graph-db] Created {waf_bypass_rels} WAF_BYPASS_VIA relationships")
 
             # =========================================================================
             # Process top-level security_checks.findings (new structure)
@@ -2641,12 +2656,30 @@ class Neo4jClient:
                             address=matched_ip, user_id=user_id, project_id=project_id, vuln_id=vuln_id
                         )
                         stats["relationships_created"] += 1
+                        relationship_created = True
+
+                    # For domain-only findings (e.g., SPF/DMARC missing): connect to Domain
+                    if not relationship_created:
+                        finding_domain = finding.get("domain")
+                        if finding_domain:
+                            result = session.run(
+                                """
+                                MATCH (d:Domain {name: $domain, user_id: $user_id, project_id: $project_id})
+                                MATCH (v:Vulnerability {id: $vuln_id})
+                                MERGE (d)-[:HAS_VULNERABILITY]->(v)
+                                RETURN count(*) as matched
+                                """,
+                                domain=finding_domain, user_id=user_id, project_id=project_id, vuln_id=vuln_id
+                            )
+                            if result.single()["matched"] > 0:
+                                stats["relationships_created"] += 1
+                                relationship_created = True
 
                 except Exception as e:
                     stats["errors"].append(f"Security finding {finding.get('type', 'unknown')} failed: {e}")
 
             if security_checks_created > 0:
-                print(f"[+] Created {security_checks_created} SecurityCheck Vulnerability nodes")
+                print(f"[+][graph-db] Created {security_checks_created} SecurityCheck Vulnerability nodes")
 
             # Update Domain node with vuln_scan metadata
             metadata = recon_data.get("metadata", {})
@@ -2681,16 +2714,16 @@ class Neo4jClient:
                 except Exception as e:
                     stats["errors"].append(f"Domain update failed: {e}")
 
-            print(f"[+] Created {stats['endpoints_created']} Endpoint nodes")
-            print(f"[+] Created {stats['parameters_created']} Parameter nodes")
-            print(f"[+] Created {stats['vulnerabilities_created']} Vulnerability nodes")
-            print(f"[+] Created {stats['relationships_created']} relationships")
+            print(f"[+][graph-db] Created {stats['endpoints_created']} Endpoint nodes")
+            print(f"[+][graph-db] Created {stats['parameters_created']} Parameter nodes")
+            print(f"[+][graph-db] Created {stats['vulnerabilities_created']} Vulnerability nodes")
+            print(f"[+][graph-db] Created {stats['relationships_created']} relationships")
             if skipped_out_of_scope > 0:
-                print(f"[*] Skipped {skipped_out_of_scope} items out of scan scope")
+                print(f"[*][graph-db] Skipped {skipped_out_of_scope} items out of scan scope")
                 stats["skipped_out_of_scope"] = skipped_out_of_scope
 
             if stats["errors"]:
-                print(f"[!] {len(stats['errors'])} errors occurred")
+                print(f"[!][graph-db] {len(stats['errors'])} errors occurred")
 
         return stats
 
@@ -2860,7 +2893,8 @@ class Neo4jClient:
                                     MERGE (e)-[:HAS_PARAMETER]->(p)
                                     """,
                                     path=path, method=method, baseurl=base_url,
-                                    param_name=param_name, position="query"
+                                    param_name=param_name, position="query",
+                                    user_id=user_id, project_id=project_id
                                 )
                                 stats["relationships_created"] += 1
 
@@ -2907,7 +2941,8 @@ class Neo4jClient:
                                     MERGE (e)-[:HAS_PARAMETER]->(p)
                                     """,
                                     path=path, baseurl=base_url,
-                                    param_name=param_name, position="body"
+                                    param_name=param_name, position="body",
+                                    user_id=user_id, project_id=project_id
                                 )
                                 stats["relationships_created"] += 1
 
@@ -2975,6 +3010,7 @@ class Neo4jClient:
                             e.form_count = $form_count
                         """,
                         path=path, method=method, baseurl=baseurl,
+                        user_id=user_id, project_id=project_id,
                         enctype=form_info["enctype"],
                         found_at_pages=list(form_info["found_at_pages"]),
                         input_names=list(form_info["input_names"]),
@@ -3010,16 +3046,16 @@ class Neo4jClient:
                 except Exception as e:
                     stats["errors"].append(f"Domain update failed: {e}")
 
-            print(f"[+] Created {stats['endpoints_created']} Endpoint nodes")
-            print(f"[+] Created {stats['parameters_created']} Parameter nodes")
-            print(f"[+] Processed {stats['forms_created']} form endpoints")
-            print(f"[+] Created {stats['relationships_created']} relationships")
+            print(f"[+][graph-db] Created {stats['endpoints_created']} Endpoint nodes")
+            print(f"[+][graph-db] Created {stats['parameters_created']} Parameter nodes")
+            print(f"[+][graph-db] Processed {stats['forms_created']} form endpoints")
+            print(f"[+][graph-db] Created {stats['relationships_created']} relationships")
             if skipped_out_of_scope > 0:
-                print(f"[*] Skipped {skipped_out_of_scope} base URLs out of scan scope")
+                print(f"[*][graph-db] Skipped {skipped_out_of_scope} base URLs out of scan scope")
                 stats["skipped_out_of_scope"] = skipped_out_of_scope
 
             if stats["errors"]:
-                print(f"[!] {len(stats['errors'])} errors occurred")
+                print(f"[!][graph-db] {len(stats['errors'])} errors occurred")
 
         return stats
 
@@ -3844,22 +3880,22 @@ class Neo4jClient:
                 except Exception as e:
                     stats["errors"].append(f"Domain update failed: {e}")
 
-            print(f"[+] Created/enriched {stats['technologies_created']} Technology nodes from GVM")
-            print(f"[+] Created {stats['ports_created']} Port nodes from GVM")
-            print(f"[+] Created {stats['vulnerabilities_created']} GVM Vulnerability nodes")
-            print(f"[+] Created {stats['exploits_gvm_created']} ExploitGvm nodes (confirmed active exploits)")
-            print(f"[+] Created {stats['traceroutes_created']} Traceroute nodes")
-            print(f"[+] CISA KEV flagged: {stats['cisa_kev_count']} vulnerabilities")
-            print(f"[+] Closed CVEs processed: {stats['closed_cves_processed']}")
-            print(f"[+] TLS Certificates created: {stats['certificates_created']}")
-            print(f"[+] Linked {stats['technologies_linked']} vulnerabilities to technologies")
-            print(f"[+] Linked {stats['cves_linked']} CVEs")
-            print(f"[+] Linked {stats['ips_linked']} IPs (fallback)")
-            print(f"[+] Linked {stats['subdomains_linked']} Subdomains")
-            print(f"[+] Created {stats['relationships_created']} relationships")
+            print(f"[+][graph-db] Created/enriched {stats['technologies_created']} Technology nodes from GVM")
+            print(f"[+][graph-db] Created {stats['ports_created']} Port nodes from GVM")
+            print(f"[+][graph-db] Created {stats['vulnerabilities_created']} GVM Vulnerability nodes")
+            print(f"[+][graph-db] Created {stats['exploits_gvm_created']} ExploitGvm nodes (confirmed active exploits)")
+            print(f"[+][graph-db] Created {stats['traceroutes_created']} Traceroute nodes")
+            print(f"[+][graph-db] CISA KEV flagged: {stats['cisa_kev_count']} vulnerabilities")
+            print(f"[+][graph-db] Closed CVEs processed: {stats['closed_cves_processed']}")
+            print(f"[+][graph-db] TLS Certificates created: {stats['certificates_created']}")
+            print(f"[+][graph-db] Linked {stats['technologies_linked']} vulnerabilities to technologies")
+            print(f"[+][graph-db] Linked {stats['cves_linked']} CVEs")
+            print(f"[+][graph-db] Linked {stats['ips_linked']} IPs (fallback)")
+            print(f"[+][graph-db] Linked {stats['subdomains_linked']} Subdomains")
+            print(f"[+][graph-db] Created {stats['relationships_created']} relationships")
 
             if stats["errors"]:
-                print(f"[!] {len(stats['errors'])} errors occurred")
+                print(f"[!][graph-db] {len(stats['errors'])} errors occurred")
 
         return stats
 
@@ -3962,7 +3998,7 @@ class Neo4jClient:
                 stats["hunts_deleted"] = record["deleted"]
 
             total = sum(stats.values())
-            print(f"[*] Cleared GitHub Hunt data: {total} items removed")
+            print(f"[*][graph-db] Cleared GitHub Hunt data: {total} items removed")
 
         return stats
 
@@ -4021,7 +4057,7 @@ class Neo4jClient:
 
             # Clear previous GitHub hunt data for this project
             clear_stats = self.clear_github_hunt_data(user_id, project_id)
-            print(f"[*] Pre-cleared: {clear_stats}")
+            print(f"[*][graph-db] Pre-cleared: {clear_stats}")
 
             # 1. Create GithubHunt node (scan metadata)
             hunt_id = f"github-hunt-{user_id}-{project_id}"
@@ -4052,7 +4088,7 @@ class Neo4jClient:
                 stats["hunt_created"] += 1
             except Exception as e:
                 stats["errors"].append(f"Failed to create GithubHunt node: {e}")
-                print(f"[!] GithubHunt creation failed: {e}")
+                print(f"[!][graph-db] GithubHunt creation failed: {e}")
                 return stats
 
             # 2. Link GithubHunt to Domain node
@@ -4070,7 +4106,7 @@ class Neo4jClient:
                 if record and record["linked"] > 0:
                     stats["relationships_created"] += 1
                 else:
-                    print(f"[!] Warning: No Domain node found for user_id={user_id}, project_id={project_id}")
+                    print(f"[!][graph-db] Warning: No Domain node found for user_id={user_id}, project_id={project_id}")
             except Exception as e:
                 stats["errors"].append(f"Failed to link GithubHunt to Domain: {e}")
 
@@ -4247,17 +4283,17 @@ class Neo4jClient:
 
             # Print summary
             print(f"\n[+] GitHub Hunt Graph Update Summary:")
-            print(f"[+] Created {stats['hunt_created']} GithubHunt node")
-            print(f"[+] Created {stats['repositories_created']} GithubRepository nodes")
-            print(f"[+] Created {stats['paths_created']} GithubPath nodes")
-            print(f"[+] Created {stats['secrets_created']} GithubSecret nodes")
-            print(f"[+] Created {stats['sensitive_files_created']} GithubSensitiveFile nodes")
-            print(f"[+] Created {stats['relationships_created']} relationships")
-            print(f"[+] Skipped {stats['findings_skipped_high_entropy']} HIGH_ENTROPY findings")
-            print(f"[+] Deduplicated {stats['findings_deduplicated']} cross-commit findings")
+            print(f"[+][graph-db] Created {stats['hunt_created']} GithubHunt node")
+            print(f"[+][graph-db] Created {stats['repositories_created']} GithubRepository nodes")
+            print(f"[+][graph-db] Created {stats['paths_created']} GithubPath nodes")
+            print(f"[+][graph-db] Created {stats['secrets_created']} GithubSecret nodes")
+            print(f"[+][graph-db] Created {stats['sensitive_files_created']} GithubSensitiveFile nodes")
+            print(f"[+][graph-db] Created {stats['relationships_created']} relationships")
+            print(f"[+][graph-db] Skipped {stats['findings_skipped_high_entropy']} HIGH_ENTROPY findings")
+            print(f"[+][graph-db] Deduplicated {stats['findings_deduplicated']} cross-commit findings")
 
             if stats["errors"]:
-                print(f"[!] {len(stats['errors'])} errors occurred")
+                print(f"[!][graph-db] {len(stats['errors'])} errors occurred")
 
         return stats
 
@@ -4576,17 +4612,17 @@ class Neo4jClient:
 
             # Print summary
             print(f"\n[+] Shodan Graph Update Summary:")
-            print(f"[+] Enriched {stats['ips_enriched']} IP nodes")
-            print(f"[+] Created {stats['ports_created']} Port nodes")
-            print(f"[+] Created {stats['services_created']} Service nodes")
-            print(f"[+] Created {stats['subdomains_created']} Subdomain nodes")
-            print(f"[+] Created {stats['dns_records_created']} DNSRecord nodes")
-            print(f"[+] Created {stats['vulnerabilities_created']} Vulnerability nodes")
-            print(f"[+] Created {stats['cves_created']} CVE nodes")
-            print(f"[+] Created {stats['relationships_created']} relationships")
+            print(f"[+][graph-db] Enriched {stats['ips_enriched']} IP nodes")
+            print(f"[+][graph-db] Created {stats['ports_created']} Port nodes")
+            print(f"[+][graph-db] Created {stats['services_created']} Service nodes")
+            print(f"[+][graph-db] Created {stats['subdomains_created']} Subdomain nodes")
+            print(f"[+][graph-db] Created {stats['dns_records_created']} DNSRecord nodes")
+            print(f"[+][graph-db] Created {stats['vulnerabilities_created']} Vulnerability nodes")
+            print(f"[+][graph-db] Created {stats['cves_created']} CVE nodes")
+            print(f"[+][graph-db] Created {stats['relationships_created']} relationships")
 
             if stats["errors"]:
-                print(f"[!] {len(stats['errors'])} errors occurred")
+                print(f"[!][graph-db] {len(stats['errors'])} errors occurred")
 
         return stats
 
@@ -4725,10 +4761,10 @@ class Neo4jClient:
                 except Exception as e:
                     stats["errors"].append(f"Domain age: {e}")
 
-            print(f"[+] URLScan discovery: {stats['subdomains_created']} subdomains, "
+            print(f"[+][graph-db] URLScan discovery: {stats['subdomains_created']} subdomains, "
                   f"{stats['ips_enriched']} IPs enriched")
             if stats["errors"]:
-                print(f"[!] {len(stats['errors'])} errors occurred")
+                print(f"[!][graph-db] {len(stats['errors'])} errors occurred")
 
         return stats
 
@@ -4861,14 +4897,14 @@ class Neo4jClient:
                 except Exception as e:
                     stats["errors"].append(f"Endpoint {path}: {e}")
 
-            print(f"[+] URLScan enrichment: {stats['baseurls_enriched']} BaseURLs enriched, "
+            print(f"[+][graph-db] URLScan enrichment: {stats['baseurls_enriched']} BaseURLs enriched, "
                   f"{stats['endpoints_created']} endpoints, {stats['parameters_created']} parameters")
             if stats["baseurls_not_found"]:
-                print(f"[*] {stats['baseurls_not_found']} BaseURLs not in graph (stale URLScan data, expected)")
+                print(f"[*][graph-db] {stats['baseurls_not_found']} BaseURLs not in graph (stale URLScan data, expected)")
             if stats["endpoints_skipped"]:
-                print(f"[*] {stats['endpoints_skipped']} endpoints skipped (BaseURL not live)")
+                print(f"[*][graph-db] {stats['endpoints_skipped']} endpoints skipped (BaseURL not live)")
             if stats["errors"]:
-                print(f"[!] {len(stats['errors'])} errors occurred")
+                print(f"[!][graph-db] {len(stats['errors'])} errors occurred")
 
         return stats
 
@@ -4933,7 +4969,7 @@ class Neo4jClient:
                 except Exception as e:
                     logger.warning(f"ExternalDomain graph error for {ed_domain}: {e}")
 
-        print(f"[+] External domains: {created} created, {len(external_domains) - created} updated")
+        print(f"[+][graph-db] External domains: {created} created, {len(external_domains) - created} updated")
 
 
 if __name__ == "__main__":
