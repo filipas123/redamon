@@ -38,6 +38,12 @@ class Finding:
     ai_payload_class: str = ""               # e.g. garak-promptinject
     ai_transcript_ref: str | None = None
     ai_probe_pack_version: str | None = None
+    # Grader provenance (grader fidelity): which judge graded this finding and
+    # whether its traffic egressed the container. Null on local-ollama runs so
+    # historical findings stay byte-identical.
+    ai_grader_provider: str | None = None   # local-ollama / openai / anthropic / openai-compatible
+    ai_grader_model: str | None = None
+    ai_grader_egress: bool | None = None    # True if the grader left the container
     evidence: str | None = None
     extra: dict = field(default_factory=dict)
 
@@ -91,6 +97,9 @@ def _props(finding: Finding, vid: str, user_id: str, project_id: str) -> dict:
         "ai_payload_class": finding.ai_payload_class,
         "ai_transcript_ref": finding.ai_transcript_ref,
         "ai_probe_pack_version": finding.ai_probe_pack_version,
+        "ai_grader_provider": finding.ai_grader_provider,
+        "ai_grader_model": finding.ai_grader_model,
+        "ai_grader_egress": finding.ai_grader_egress,
     }
 
 

@@ -2977,6 +2977,9 @@ labels). `source` ∈ {`garak`, `pyrit`, `giskard`, `promptfoo`}. Properties:
 | `ai_probe_pack_version` | tool+version for reproducibility, e.g. `garak/0.15.1`, `pyrit/0.14.0`, `giskard/2.19.1`, `promptfoo/0.121.17` |
 | `ai_transcript_ref` | path to the saved native report on disk (`ai_attack_surface_scan/output/{run_id}/{tool}/…`) |
 | `ai_target_url` | the attacked URL (so a custom off-graph target still displays a target) |
+| `ai_grader_provider` | the judge that graded this finding: `local-ollama` (default, zero egress) / `openai` / `anthropic` / `openai-compatible`. promptfoo grader-fidelity lap; null on the other tools until they adopt the same path. |
+| `ai_grader_model` | the grader model id, e.g. `qwen2.5:7b`, `gpt-4o`, `claude-opus-4-6`. Lets a report cite exactly what judged each ASR. |
+| `ai_grader_egress` | `true` if the grader's verdict traffic left the scan container (external grader); `false`/null for the local-Ollama default. Audit/disclosure flag — an egressing grader sees the attack transcripts. |
 | `ai_attack_synthetic` | `true` on a `BaseURL`/`Endpoint`/`Subdomain`/`Domain`/`IP` node the normalizer *created* for a custom off-graph target (so it never overwrites or is confused with a recon-discovered node). Such nodes also carry `source='ai_attack_target'`. |
 
 Deterministic `id` (`aiatk_<sha16>`, keyed on source + OWASP-LLM id + payload_class +
@@ -2996,7 +2999,7 @@ Documented here so the prefix convention stays coherent as later laps land. Empt
 
 | Node label | Reserved property | Lap |
 |---|---|---|
-| `Vulnerability` | `ai_asr`, `ai_trials`, `ai_oracle_kind`, `ai_transcript_ref`, `ai_payload_class`, `ai_probe_pack_version`, `ai_target_url` | ✅ **SHIPPED** — AI Attack Surface (garak/pyrit/giskard/promptfoo, see section above) |
+| `Vulnerability` | `ai_asr`, `ai_trials`, `ai_oracle_kind`, `ai_transcript_ref`, `ai_payload_class`, `ai_probe_pack_version`, `ai_target_url`, `ai_grader_provider`, `ai_grader_model`, `ai_grader_egress` | ✅ **SHIPPED** — AI Attack Surface (garak/pyrit/giskard/promptfoo, see section above). Grader provenance (last 3) shipped on promptfoo; null on the others until they adopt the external-grader path. |
 | `CVE` | `is_ai_library` | vuln_scan AI library lookup lap |
 | `Secret` / `TrufflehogFinding` / `GithubSecret` | `ai_provider` | trufflehog / github-secret-hunt AI detector lap |
 | `JsReconFinding` | `finding_type` values `ai-sdk-client`, `ai-sdk-key-literal`, `ai-sdk-browser-allowed`, `ai-frontend-detected` | js_recon AI SDK lap |

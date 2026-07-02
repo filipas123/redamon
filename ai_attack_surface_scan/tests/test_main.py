@@ -186,6 +186,8 @@ class TestRunToolDispatch(unittest.TestCase):
         cfg.auth_header = "Authorization"
         cfg.auth_scheme = "Bearer"
         cfg.api_key = "tok"
+        cfg.grader_provider = "openai"
+        cfg.grader_model = "gpt-4o"
         with patch("adapters.promptfoo.run", side_effect=fake_run):
             findings = main.run_tool(cfg, [t_bad, t_ok])
         self.assertEqual(len(findings), 1)            # bad target isolated
@@ -193,6 +195,9 @@ class TestRunToolDispatch(unittest.TestCase):
         self.assertEqual(captured["plugins"], ["beavertails"])
         self.assertEqual(captured["judge_base_url"], "http://localhost:11434")
         self.assertEqual(captured["api_key"], "tok")
+        # grader fidelity: the dispatch forwards the grader routing fields.
+        self.assertEqual(captured["grader_provider"], "openai")
+        self.assertEqual(captured["grader_model"], "gpt-4o")
 
     def test_garak_passes_probes_and_judge_through(self):
         from normalizer import Finding

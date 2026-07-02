@@ -106,11 +106,31 @@ def build_config(target, *, plugins: list[str], strategies: list[str],
                  num_tests: int, judge_base_url: str, judge_model: str,
                  purpose: str = "A general-purpose chat assistant.",
                  model: str | None = None, auth_header: str | None = None,
-                 auth_scheme: str | None = None) -> dict:
+                 auth_scheme: str | None = None,
+                 grader_provider: str = "local-ollama",
+                 grader_model: str | None = None,
+                 grader_base_url: str | None = None,
+                 grader_has_key: bool = False) -> dict:
     """Full promptfoo config: target provider + redteam (plugins/strategies) +
-    local grader provider (zero egress)."""
-    base = (judge_base_url or "").rstrip("/")
-    grader_base = base + "/v1"        # OpenAI-compatible shim that Ollama serves
+    grader provider.
+
+    The grader provider is built by `adapters.grader.build_grader_provider`.
+    For `local-ollama` (default) it points at the local Ollama /v1 shim with a
+    synthetic key (zero egress, historical behaviour). For an external backend
+    (openai / anthropic / openai-compatible) it points at the hosted/self-hosted
+    model; the real key is injected ENV-only by the adapter, never written here.
+    `grader_model` falls back to `judge_model` so the default local path is
+    unchanged when no explicit grader model is given.
+    """
+    from adapters.grader import build_grader_provider
+
+    resolved_grader_model = (grader_model or judge_model or "").strip()
+    # local-ollama uses the on-demand Ollama URL the orchestrator supplied; an
+    # explicit grader_base_url overrides it (e.g. a self-hosted openai-compatible).
+    local_base = (grader_base_url or judge_base_url or "").rstrip("/") or None
+
+    grader = build_grader_provider(
+        grader_provider, resolved_grader_model, local_base, has_key=grader_has_key)
     return {
         "description": "redamon ai-attack-surface promptfoo run",
         "targets": [build_target_provider(target, model, auth_header, auth_scheme)],
@@ -119,9 +139,6 @@ def build_config(target, *, plugins: list[str], strategies: list[str],
             "numTests": int(num_tests),
             "plugins": [{"id": p} for p in plugins],
             "strategies": [{"id": s} for s in strategies],
-            "provider": {
-                "id": f"openai:chat:{judge_model}",
-                "config": {"apiBaseUrl": grader_base, "apiKey": "sk-noop"},
-            },
+            "provider": grader,
         },
     }

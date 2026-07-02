@@ -20,7 +20,13 @@ vi.mock('@/app/api/graph/neo4j', () => ({
 }))
 
 const findUnique = vi.fn()
-vi.mock('@/lib/prisma', () => ({ default: { project: { findUnique: (...a: unknown[]) => findUnique(...a) } } }))
+const llmProviderFindFirst = vi.fn()
+vi.mock('@/lib/prisma', () => ({
+  default: {
+    project: { findUnique: (...a: unknown[]) => findUnique(...a) },
+    userLlmProvider: { findFirst: (...a: unknown[]) => llmProviderFindFirst(...a) },
+  },
+}))
 
 const targetsRoute = await import('./[projectId]/targets/route')
 const findingsRoute = await import('./[projectId]/findings/route')
@@ -34,6 +40,7 @@ beforeEach(() => {
   runCalls.length = 0
   runReturn = []
   findUnique.mockReset()
+  llmProviderFindFirst.mockReset()
   vi.restoreAllMocks()
 })
 
@@ -125,5 +132,68 @@ describe('start route', () => {
     const res = await startRoute.POST(req({ tool: 'garak' }), params('proj1') as never)
     expect(res.status).toBe(409)
     expect((await res.json()).error).toMatch(/limit/)
+  })
+
+  test('external grader: key sent via X-Grader-Key header, never in body', async () => {
+    findUnique.mockResolvedValue({ id: 'proj1', userId: 'user1' })
+    llmProviderFindFirst.mockResolvedValue({
+      id: 'prov1', providerType: 'openai', apiKey: 'sk-grader-secret',
+      modelIdentifier: 'gpt-4o', baseUrl: '',
+    })
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, json: async () => ({ run_id: 'r1', status: 'running', tool: 'promptfoo' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const res = await startRoute.POST(
+      req({
+        tool: 'promptfoo', targets: [{ baseurl: 'http://h', path: '/c' }],
+        bounds: { trials: 1, grader_provider: 'openai', grader_provider_id: 'prov1', grader_consent: true },
+        roe_confirmed: true, probes: ['beavertails'],
+      }),
+      params('proj1') as never,
+    )
+    expect(res.status).toBe(200)
+    const [url, opts] = fetchMock.mock.calls[0]
+    expect(url).toMatch(/\/ai-attack-surface\/proj1\/start$/)
+    const headers = (opts as { headers: Record<string, string> }).headers
+    // key travels out-of-band only
+    expect(headers['X-Grader-Key']).toBe('sk-grader-secret')
+    const forwarded = JSON.parse((opts as { body: string }).body)
+    expect(JSON.stringify(forwarded)).not.toContain('sk-grader-secret')
+    expect(forwarded.bounds.grader_provider).toBe('openai')
+    expect(forwarded.bounds.grader_model).toBe('gpt-4o')
+    expect(forwarded.bounds.grader_consent).toBe(true)
+    // provider id is NOT forwarded (orchestrator doesn't need it)
+    expect(forwarded.bounds).not.toHaveProperty('grader_provider_id')
+  })
+
+  test('external grader without a stored provider returns 400', async () => {
+    findUnique.mockResolvedValue({ id: 'proj1', userId: 'user1' })
+    llmProviderFindFirst.mockResolvedValue(null)
+    vi.stubGlobal('fetch', vi.fn())
+    const res = await startRoute.POST(
+      req({
+        tool: 'promptfoo', targets: [],
+        bounds: { grader_provider: 'openai', grader_provider_id: 'missing', grader_consent: true },
+        roe_confirmed: true, probes: ['beavertails'],
+      }),
+      params('proj1') as never,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  test('external grader without provider_id returns 400', async () => {
+    findUnique.mockResolvedValue({ id: 'proj1', userId: 'user1' })
+    vi.stubGlobal('fetch', vi.fn())
+    const res = await startRoute.POST(
+      req({
+        tool: 'promptfoo', targets: [],
+        bounds: { grader_provider: 'openai', grader_consent: true },
+        roe_confirmed: true, probes: ['beavertails'],
+      }),
+      params('proj1') as never,
+    )
+    expect(res.status).toBe(400)
   })
 })

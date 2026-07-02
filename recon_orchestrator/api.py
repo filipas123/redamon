@@ -1028,12 +1028,22 @@ async def upload_artifact(project_id: str, artifact_type: str, file: UploadFile)
 
 
 @app.post("/ai-attack-surface/{project_id}/start", response_model=AiAttackSurfaceState)
-async def start_ai_attack_surface(project_id: str, request: AiAttackSurfaceStartRequest):
+async def start_ai_attack_surface(project_id: str, request: AiAttackSurfaceStartRequest,
+                                 http_request: Request):
     """Start an AI Attack Surface job (one tool) against selected AI nodes.
 
     Brings up the on-demand Ollama judge (ref-counted) and spawns the
     ai_attack_surface_scan container. Launch reuses the partial-recon Run model:
     it runs a tool against the existing graph without re-crawling.
+
+    External grader (promptfoo fidelity): the grader API key is delivered out of
+    band via the `X-Grader-Key` request header (server-resolved by the webapp
+    from the operator's UserLlmProvider). It is NEVER placed into `run_config`
+    — that dict is persisted to /tmp/redamon and read back by the scan
+    container; instead it is forwarded to start_ai_attack_surface which injects
+    it ENV-only into the scan container. Only the non-secret grader routing
+    fields (bounds.grader_provider / grader_model / grader_base_url) travel in
+    the body.
     """
     if not container_manager:
         raise HTTPException(status_code=503, detail="Service not initialized")
@@ -1043,10 +1053,35 @@ async def start_ai_attack_surface(project_id: str, request: AiAttackSurfaceStart
             detail="AI Attack Surface source not mounted into the orchestrator",
         )
 
+    # External grader key — ENV-only path. Read from the header; do NOT echo it
+    # anywhere in run_config / the response. Empty for the local-Ollama default.
+    grader_api_key = (http_request.headers.get("x-grader-key") or "").strip()
+
+    bounds = dict(request.bounds or {})
+    grader_provider = str(bounds.get("grader_provider", "local-ollama") or "local-ollama")
+    # RoE + consent gate: an external grader breaks the marketed zero-egress
+    # guarantee, so require an explicit per-launch consent AND RoE confirmation.
+    if grader_provider != "local-ollama":
+        if not request.roe_confirmed:
+            raise HTTPException(
+                status_code=400,
+                detail="External grader requires RoE confirmation + grader consent",
+            )
+        if not bounds.get("grader_consent"):
+            raise HTTPException(
+                status_code=400,
+                detail="External grader requires explicit grader consent",
+            )
+        if not grader_api_key:
+            raise HTTPException(
+                status_code=400,
+                detail="External grader requires an X-Grader-Key header",
+            )
+
     run_config = {
         "tool": request.tool,
         "targets": request.targets,
-        "bounds": request.bounds,
+        "bounds": bounds,
         "roe_confirmed": request.roe_confirmed,
         "dry_run": request.dry_run,
         "probes": request.probes,
@@ -1068,6 +1103,7 @@ async def start_ai_attack_surface(project_id: str, request: AiAttackSurfaceStart
             webapp_api_url=_spawned_webapp_url(),
             run_config=run_config,
             ai_attack_path=AI_ATTACK_SURFACE_PATH,
+            grader_api_key=grader_api_key or None,
         )
         return state
     except ValueError as e:

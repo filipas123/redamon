@@ -69,13 +69,28 @@ def run(target, bounds, output_dir: str, run_id: str,
         strategies: list[str] | None = None,
         target_model: str | None = None, target_purpose: str | None = None,
         api_key: str | None = None,
-        auth_header: str | None = None, auth_scheme: str | None = None) -> list[Finding]:
+        auth_header: str | None = None, auth_scheme: str | None = None,
+        grader_provider: str = "local-ollama",
+        grader_model: str | None = None,
+        grader_base_url: str | None = None) -> list[Finding]:
     """Run promptfoo's red-team eval against one target. Failure-soft.
 
-    Needs the local Ollama as grader/generator -- without judge_base_url it
-    returns [] with a warning (no degraded mode)."""
-    if not judge_base_url:
+    The grader defaults to the local Ollama (zero egress, historical behaviour):
+    it needs `judge_base_url` pointing at the on-demand Ollama. An external
+    grader (`grader_provider` in {openai, anthropic, openai-compatible}) instead
+    egresses the grader traffic to a closed model whose key is ENV-only
+    (GRADER_API_KEY); payload generation stays offline in both cases."""
+    from adapters.grader import is_external
+
+    external = is_external(grader_provider)
+    grader_api_key = os.environ.get("GRADER_API_KEY") if external else None
+
+    if not external and not judge_base_url:
         logger.warning("promptfoo needs a local grader (judge_base_url); skipping")
+        return []
+    if external and not grader_api_key:
+        logger.warning(f"promptfoo external grader '{grader_provider}' has no "
+                       "GRADER_API_KEY env; skipping")
         return []
 
     sel_plugins, derived_strategies = _resolve_plugins_strategies(plugins)
@@ -103,6 +118,8 @@ def run(target, bounds, output_dir: str, run_id: str,
         judge_base_url=judge_base_url, judge_model=bounds.judge_model or "qwen2.5:7b",
         purpose=(target_purpose or "").strip() or "A general-purpose chat assistant.",
         model=target_model, auth_header=auth_header, auth_scheme=auth_scheme,
+        grader_provider=grader_provider, grader_model=grader_model,
+        grader_base_url=grader_base_url, grader_has_key=bool(grader_api_key),
     )
     cfg_path = out / "promptfoo_config.json"
     gen_path = out / "promptfoo_redteam.json"
@@ -112,7 +129,8 @@ def run(target, bounds, output_dir: str, run_id: str,
     rc, tail = _invoke(cfg_path, gen_path, results_path, api_key,
                        strategies=sel_strategies,
                        parallel_attempts=max(1, int(getattr(bounds, "parallelism", 2) or 2)),
-                       timeout=int(getattr(bounds, "timeout", 0) or DEFAULT_TIMEOUT))
+                       timeout=int(getattr(bounds, "timeout", 0) or DEFAULT_TIMEOUT),
+                       grader_provider=grader_provider, grader_api_key=grader_api_key)
     if not os.path.exists(results_path):
         logger.warning(f"promptfoo produced no results (rc={rc}); tail:\n{tail}")
         return []
@@ -129,6 +147,7 @@ def run(target, bounds, output_dir: str, run_id: str,
         if pl.asr < threshold or pl.trials == 0:
             continue
         owasp, chip = map_plugin(pl.plugin)
+        resolved_grader_model = grader_model or bounds.judge_model or ""
         findings.append(Finding(
             source="promptfoo",
             chip=chip,
@@ -146,7 +165,12 @@ def run(target, bounds, output_dir: str, run_id: str,
             ai_payload_class=f"promptfoo-{pl.plugin}",
             ai_transcript_ref=str(results_path),
             ai_probe_pack_version=f"promptfoo/{version}",
-            evidence=f"{pl.plugin}: {pl.hits}/{pl.trials} (worst: {pl.top_strategy})",
+            ai_grader_provider=grader_provider,
+            ai_grader_model=resolved_grader_model,
+            ai_grader_egress=external,
+            evidence=(f"{pl.plugin}: {pl.hits}/{pl.trials} (worst: {pl.top_strategy})"
+                      f" [grader={grader_provider}:{resolved_grader_model}"
+                      f"{',egress' if external else ''}]"),
         ))
 
     logger.info(f"promptfoo: {len(findings)} finding(s) above ASR>={threshold}")
@@ -154,7 +178,9 @@ def run(target, bounds, output_dir: str, run_id: str,
 
 
 def _invoke(cfg_path, gen_path, results_path, api_key, strategies=None,
-            parallel_attempts=2, timeout=DEFAULT_TIMEOUT):
+            parallel_attempts=2, timeout=DEFAULT_TIMEOUT,
+            grader_provider: str = "local-ollama",
+            grader_api_key: str | None = None):
     """Run the promptfoo 2-step. Returns (rc, log tail). Failure-soft.
 
     Between generate and eval we expand the generated tests with our LOCAL
@@ -164,9 +190,29 @@ def _invoke(cfg_path, gen_path, results_path, api_key, strategies=None,
 
     `parallel_attempts` caps how many test cases eval runs concurrently against
     the target (promptfoo -j) — keep it low for a slow/CPU target. `timeout` is
-    the wall-clock budget applied to each step (generate + eval)."""
-    env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
-    env.update(_OFFLINE_ENV)
+    the wall-clock budget applied to each step (generate + eval).
+
+    Egress guard: for the default `local-ollama` grader we strip OPENAI_API_KEY
+    and disable remote generation/telemetry (zero egress). For an external grader
+    (openai/anthropic/openai-compatible) we still disable remote generation (the
+    adversarial payloads stay local) but inject the grader key env so only the
+    grader's verdict traffic egresses — keyed on `grader_provider`/`grader_api_key`.
+    The target key (`api_key`) handling is unchanged in both modes."""
+    from adapters.grader import is_external
+
+    external = is_external(grader_provider)
+    if external:
+        env = dict(os.environ)   # keep any grader key env the orchestrator set
+        env.update(_OFFLINE_ENV)  # payloads still generated offline
+        if grader_api_key:
+            if grader_provider.lower() == "anthropic":
+                env["ANTHROPIC_API_KEY"] = grader_api_key
+            else:  # openai / openai-compatible both read OPENAI_API_KEY
+                env["OPENAI_API_KEY"] = grader_api_key
+    else:
+        # Zero-egress default: never inherit a hosted OPENAI_API_KEY.
+        env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
+        env.update(_OFFLINE_ENV)
     if api_key:
         from .provider_config import TARGET_KEY_ENV
         env[TARGET_KEY_ENV] = api_key

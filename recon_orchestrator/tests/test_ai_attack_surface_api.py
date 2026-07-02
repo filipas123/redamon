@@ -5,6 +5,7 @@ The route coroutines are awaited directly against a faked container_manager
 the 503 guards (uninitialized / source not mounted).
 """
 import asyncio
+import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -52,8 +53,14 @@ class TestAiAttackRoutes(unittest.TestCase):
         base.update(kw)
         return AiAttackSurfaceStartRequest(**base)
 
+    def _http(self, grader_key=None):
+        """A fake FastAPI Request exposing only the headers the route reads."""
+        req = MagicMock()
+        req.headers = {"x-grader-key": grader_key} if grader_key else {}
+        return req
+
     def test_start_builds_run_config_and_delegates(self):
-        out = run(api.start_ai_attack_surface("p", self._req()))
+        out = run(api.start_ai_attack_surface("p", self._req(), self._http()))
         self.assertEqual(out.status, AiAttackSurfaceStatus.RUNNING)
         kwargs = self.mgr.start_ai_attack_surface.call_args.kwargs
         rc = kwargs["run_config"]
@@ -62,24 +69,64 @@ class TestAiAttackRoutes(unittest.TestCase):
         self.assertEqual(rc["bounds"], {"judge_model": "m"})
         self.assertEqual(len(rc["targets"]), 1)
         self.assertEqual(kwargs["ai_attack_path"], "/host/ai_attack_surface_scan")
+        # local grader default -> no key forwarded
+        self.assertIsNone(kwargs["grader_api_key"])
 
     def test_start_503_when_uninitialized(self):
         api.container_manager = None
         with self.assertRaises(HTTPException) as ctx:
-            run(api.start_ai_attack_surface("p", self._req()))
+            run(api.start_ai_attack_surface("p", self._req(), self._http()))
         self.assertEqual(ctx.exception.status_code, 503)
 
     def test_start_503_when_source_not_mounted(self):
         api.AI_ATTACK_SURFACE_PATH = ""
         with self.assertRaises(HTTPException) as ctx:
-            run(api.start_ai_attack_surface("p", self._req()))
+            run(api.start_ai_attack_surface("p", self._req(), self._http()))
         self.assertEqual(ctx.exception.status_code, 503)
 
     def test_start_value_error_becomes_409(self):
         self.mgr.start_ai_attack_surface = AsyncMock(side_effect=ValueError("limit"))
         with self.assertRaises(HTTPException) as ctx:
-            run(api.start_ai_attack_surface("p", self._req()))
+            run(api.start_ai_attack_surface("p", self._req(), self._http()))
         self.assertEqual(ctx.exception.status_code, 409)
+
+    # --- external grader gate (grader fidelity) ---------------------------
+
+    def test_external_grader_without_consent_is_400(self):
+        req = self._req(bounds={"judge_model": "m", "grader_provider": "openai"},
+                        roe_confirmed=True)
+        with self.assertRaises(HTTPException) as ctx:
+            run(api.start_ai_attack_surface("p", req, self._http("k")))
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_external_grader_without_roe_is_400(self):
+        req = self._req(bounds={"judge_model": "m", "grader_provider": "openai",
+                                "grader_consent": True}, roe_confirmed=False)
+        with self.assertRaises(HTTPException) as ctx:
+            run(api.start_ai_attack_surface("p", req, self._http("k")))
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_external_grader_without_key_header_is_400(self):
+        req = self._req(bounds={"judge_model": "m", "grader_provider": "openai",
+                                "grader_consent": True}, roe_confirmed=True)
+        with self.assertRaises(HTTPException) as ctx:
+            run(api.start_ai_attack_surface("p", req, self._http(None)))
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_external_grader_forwards_key_env_only_not_in_run_config(self):
+        req = self._req(bounds={"judge_model": "m", "grader_provider": "openai",
+                                "grader_model": "gpt-4o", "grader_consent": True},
+                        roe_confirmed=True)
+        run(api.start_ai_attack_surface("p", req, self._http("sk-grader")))
+        kwargs = self.mgr.start_ai_attack_surface.call_args.kwargs
+        # key forwarded to the container manager, NOT persisted in run_config
+        self.assertEqual(kwargs["grader_api_key"], "sk-grader")
+        rc = kwargs["run_config"]
+        self.assertNotIn("grader_api_key", rc)
+        self.assertNotIn("sk-grader", json.dumps(rc))   # secret never serialized
+        # non-secret grader routing stamped into run_config for the scan container
+        self.assertEqual(rc["grader_provider"], "openai")
+        self.assertEqual(rc["grader_model"], "gpt-4o")
 
     def test_status_delegates(self):
         out = run(api.get_ai_attack_surface_status("p", "r1"))

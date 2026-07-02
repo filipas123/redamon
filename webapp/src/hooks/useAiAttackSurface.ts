@@ -24,7 +24,21 @@ export interface LaunchTarget {
 export interface LaunchPayload {
   tool: string
   targets: LaunchTarget[]
-  bounds: { trials?: number; asr_threshold?: number; judge_model?: string; max_turns?: number; seed?: number; parallelism?: number; timeout?: number }
+  bounds: {
+    trials?: number
+    asr_threshold?: number
+    judge_model?: string
+    max_turns?: number
+    seed?: number
+    parallelism?: number
+    timeout?: number
+    // Grader fidelity (promptfoo). Default local-ollama (zero egress). An
+    // external grader egresses the grader's verdict traffic to a closed model.
+    grader_provider?: string          // local-ollama | openai | anthropic | openai-compatible
+    grader_provider_id?: string       // a stored UserLlmProvider.id (key resolved server-side)
+    grader_model?: string             // the grader model id
+    grader_consent?: boolean          // operator opt-in (RoE-gated)
+  }
   roe_confirmed: boolean
   dry_run?: boolean
   probes?: string[]

@@ -448,6 +448,171 @@ class TestAdapterFindings(unittest.TestCase):
                          {"basic", "base64", "morse"})
 
 
+class TestGraderProvider(unittest.TestCase):
+    """adapters/grader.build_grader_provider emits the right redteam.provider."""
+    def test_local_ollama_unchanged(self):
+        from adapters.grader import build_grader_provider
+        p = build_grader_provider("local-ollama", "qwen2.5:7b", "http://o:11434/")
+        self.assertEqual(p["id"], "openai:chat:qwen2.5:7b")
+        self.assertEqual(p["config"]["apiBaseUrl"], "http://o:11434/v1")
+        self.assertEqual(p["config"]["apiKey"], "sk-noop")
+
+    def test_openai_hosted_no_baseurl(self):
+        from adapters.grader import build_grader_provider
+        p = build_grader_provider("openai", "gpt-4o", None, has_key=True)
+        self.assertEqual(p["id"], "openai:chat:gpt-4o")
+        self.assertNotIn("config", p)   # hosted: key via OPENAI_API_KEY env
+
+    def test_anthropic(self):
+        from adapters.grader import build_grader_provider
+        p = build_grader_provider("anthropic", "claude-opus-4-6", None, has_key=True)
+        self.assertEqual(p["id"], "anthropic:chat:claude-opus-4-6")
+
+    def test_openai_compatible_uses_baseurl(self):
+        from adapters.grader import build_grader_provider
+        p = build_grader_provider("openai-compatible", "qwen:32b", "http://vllm:8000")
+        self.assertEqual(p["id"], "openai:chat:qwen:32b")
+        self.assertEqual(p["config"]["apiBaseUrl"], "http://vllm:8000/v1")
+
+    def test_unknown_falls_back_to_local(self):
+        from adapters.grader import build_grader_provider
+        p = build_grader_provider("bogus", "m", "http://x")
+        self.assertEqual(p["id"], "openai:chat:m")
+        self.assertEqual(p["config"]["apiKey"], "sk-noop")
+
+    def test_is_external(self):
+        from adapters.grader import is_external
+        self.assertFalse(is_external("local-ollama"))
+        self.assertFalse(is_external(None))
+        self.assertTrue(is_external("openai"))
+        self.assertTrue(is_external("anthropic"))
+        self.assertTrue(is_external("openai-compatible"))
+
+
+class TestGraderConfigEmission(unittest.TestCase):
+    def _t(self):
+        return Target(baseurl="http://h:8000", path="/v1/chat/completions",
+                      method="POST", ai_interface_type="llm-chat", ai_model_ids=["qwen"])
+
+    def test_build_config_external_openai(self):
+        cfg = pc.build_config(self._t(), plugins=["beavertails"], strategies=["basic"],
+                              num_tests=1, judge_base_url="http://o:11434",
+                              judge_model="qwen2.5:7b", grader_provider="openai",
+                              grader_model="gpt-4o", grader_has_key=True)
+        prov = cfg["redteam"]["provider"]
+        self.assertEqual(prov["id"], "openai:chat:gpt-4o")
+        self.assertNotIn("config", prov)
+
+    def test_build_config_external_anthropic(self):
+        cfg = pc.build_config(self._t(), plugins=["beavertails"], strategies=["basic"],
+                              num_tests=1, judge_base_url="http://o:11434",
+                              judge_model="qwen", grader_provider="anthropic",
+                              grader_model="claude-opus-4-6", grader_has_key=True)
+        self.assertEqual(cfg["redteam"]["provider"]["id"],
+                         "anthropic:chat:claude-opus-4-6")
+
+    def test_build_config_external_compatible_uses_grader_base_url(self):
+        cfg = pc.build_config(self._t(), plugins=["beavertails"], strategies=["basic"],
+                              num_tests=1, judge_base_url="http://o:11434",
+                              judge_model="qwen", grader_provider="openai-compatible",
+                              grader_model="qwen:32b", grader_base_url="http://vllm:8000")
+        prov = cfg["redteam"]["provider"]
+        self.assertEqual(prov["id"], "openai:chat:qwen:32b")
+        self.assertEqual(prov["config"]["apiBaseUrl"], "http://vllm:8000/v1")
+
+    def test_build_config_local_default_unchanged_by_grader_fields(self):
+        # No grader_provider passed -> local-ollama default, identical to before.
+        cfg = pc.build_config(self._t(), plugins=["beavertails"], strategies=["basic"],
+                              num_tests=1, judge_base_url="http://o:11434",
+                              judge_model="qwen2.5:7b")
+        prov = cfg["redteam"]["provider"]
+        self.assertEqual(prov["id"], "openai:chat:qwen2.5:7b")
+        self.assertEqual(prov["config"]["apiKey"], "sk-noop")
+
+
+class TestGraderInvokeEgress(unittest.TestCase):
+    """_invoke egress guard is conditional on the grader provider."""
+    def _capture_env(self, grader_provider, grader_api_key=None):
+        with tempfile.TemporaryDirectory() as d, \
+             patch.dict(os.environ, {"OPENAI_API_KEY": "leak", "GRADER_API_KEY": grader_api_key or ""}), \
+             patch.object(padapter, "run_streamed") as mrun:
+            gen_path = os.path.join(d, "gen.json")
+            def side(cmd, env=None, **kw):
+                if "generate" in cmd:
+                    open(gen_path, "w").close()
+                return (0, "")
+            mrun.side_effect = side
+            padapter._invoke(os.path.join(d, "cfg.json"), gen_path,
+                             os.path.join(d, "out.json"), api_key="sk-target",
+                             grader_provider=grader_provider,
+                             grader_api_key=grader_api_key)
+            return mrun.call_args_list[0].kwargs["env"]
+
+    def test_local_strips_openai_key(self):
+        env = self._capture_env("local-ollama")
+        self.assertNotIn("OPENAI_API_KEY", env)
+        self.assertEqual(env["PROMPTFOO_DISABLE_REDTEAM_REMOTE_GENERATION"], "true")
+
+    def test_external_openai_injects_grader_key(self):
+        env = self._capture_env("openai", grader_api_key="sk-grader-secret")
+        self.assertEqual(env["OPENAI_API_KEY"], "sk-grader-secret")
+        self.assertEqual(env["REDAMON_TARGET_KEY"], "sk-target")
+        # payloads still generated offline
+        self.assertEqual(env["PROMPTFOO_DISABLE_REDTEAM_REMOTE_GENERATION"], "true")
+
+    def test_external_anthropic_uses_anthropic_key(self):
+        env = self._capture_env("anthropic", grader_api_key="ant-secret")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "ant-secret")
+        self.assertEqual(env.get("OPENAI_API_KEY"), "leak")  # not stripped externally
+
+    def test_external_compatible_uses_openai_key(self):
+        env = self._capture_env("openai-compatible", grader_api_key="k")
+        self.assertEqual(env["OPENAI_API_KEY"], "k")
+
+
+class TestGraderProvenance(unittest.TestCase):
+    """Findings carry grader provenance; external runs flag egress."""
+    def _target(self):
+        return Target(baseurl="http://h:8000", path="/v1/chat/completions",
+                      method="POST", ai_interface_type="llm-chat", ai_model_ids=["qwen"])
+
+    def _run(self, grader_provider, grader_api_key=None, grader_model=None):
+        from adapters.promptfoo.parser import PluginResult, PromptfooReport
+        report = PromptfooReport(promptfoo_version="0.121.17", plugins=[
+            PluginResult(plugin="beavertails", asr=0.5, hits=2, trials=4, top_strategy="basic")])
+        with tempfile.TemporaryDirectory() as d, \
+             patch.dict(os.environ, {"GRADER_API_KEY": grader_api_key or ""}):
+            def fake_invoke(c, g, r, k, **_):
+                open(r, "w").close()
+                return 0, ""
+            with patch.object(padapter, "_invoke", side_effect=fake_invoke), \
+                 patch.object(padapter, "parse_report", return_value=report):
+                return padapter.run(self._target(),
+                                    Bounds(judge_model="qwen2.5:7b", asr_threshold=0.3),
+                                    output_dir=d, run_id="t1",
+                                    judge_base_url="http://ollama:11434",
+                                    grader_provider=grader_provider,
+                                    grader_model=grader_model)
+
+    def test_local_finding_no_egress(self):
+        f = self._run("local-ollama")[0]
+        self.assertEqual(f.ai_grader_provider, "local-ollama")
+        self.assertEqual(f.ai_grader_model, "qwen2.5:7b")
+        self.assertFalse(f.ai_grader_egress)
+        self.assertIn("grader=local-ollama:qwen2.5:7b", f.evidence)
+
+    def test_external_openai_finding_flags_egress(self):
+        f = self._run("openai", grader_api_key="sk", grader_model="gpt-4o")[0]
+        self.assertEqual(f.ai_grader_provider, "openai")
+        self.assertEqual(f.ai_grader_model, "gpt-4o")
+        self.assertTrue(f.ai_grader_egress)
+        self.assertIn(",egress]", f.evidence)
+
+    def test_external_without_key_returns_empty(self):
+        # No GRADER_API_KEY env -> external grader can't run; soft-skip.
+        self.assertEqual(self._run("openai", grader_api_key=None), [])
+
+
 def _promptfoo_bin():
     import shutil
     return shutil.which(os.environ.get("PROMPTFOO_BIN", "promptfoo"))

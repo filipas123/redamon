@@ -1330,12 +1330,18 @@ class ContainerManager:
         webapp_api_url: str,
         run_config: dict,
         ai_attack_path: str,
+        grader_api_key: str | None = None,
     ) -> AiAttackSurfaceState:
         """Spawn an AI Attack Surface job: ensure the Ollama judge is up
         (ref-counted), write the run config, and start the scan container.
 
         `run_config` is the shape ai_attack_surface_scan/config.py expects
         (tool, targets, bounds, roe_confirmed, dry_run).
+
+        `grader_api_key` is the grader's API key for an EXTERNAL grader
+        (openai/anthropic/openai-compatible), delivered ENV-only — it is injected
+        into the scan container's environment and is NEVER written to the
+        /tmp/redamon config JSON. None for the default local-Ollama grader.
         """
         import json
 
@@ -1359,6 +1365,15 @@ class ContainerManager:
         self.ai_attack_states.setdefault(project_id, {})[run_id] = state
         config_path = None   # set once written; may be None if we fail before that
 
+        # Grader routing (grader fidelity). bounds.grader_provider selects the
+        # grader backend; "local-ollama" (default/empty) keeps the historical
+        # on-demand Ollama judge. An external provider skips the local LLM
+        # lease and instead has the scan container call the hosted grader with
+        # the ENV-only grader_api_key.
+        bounds = run_config.get("bounds") or {}
+        grader_provider = str(bounds.get("grader_provider", "local-ollama") or "local-ollama")
+        external_grader = grader_provider not in ("", "local-ollama")
+
         try:
             # Ensure the scanner image exists.
             try:
@@ -1372,11 +1387,13 @@ class ContainerManager:
                     rm=True,
                 )
 
-            # Bring up the Ollama judge (ref-counted), unless this is a dry run
-            # or no judge model is configured. Failure-soft: ensure_up never
-            # raises; the scan degrades to no-judge.
-            judge_model = (run_config.get("bounds") or {}).get("judge_model")
-            if self.local_llm_manager and judge_model and not run_config.get("dry_run"):
+            # Bring up the Ollama judge (ref-counted) — only for the default
+            # local grader, and only when a judge model is configured and this
+            # isn't a dry run. Failure-soft: ensure_up never raises; the scan
+            # degrades to no-judge. An external grader skips this entirely
+            # (no local LLM lease) and relies on grader_base_url instead.
+            judge_model = bounds.get("judge_model")
+            if not external_grader and self.local_llm_manager and judge_model and not run_config.get("dry_run"):
                 llm_status = await asyncio.to_thread(self.local_llm_manager.ensure_up, judge_model)
                 state.llm_leased = True
                 run_config["judge_base_url"] = llm_status.base_url
@@ -1385,6 +1402,19 @@ class ContainerManager:
                         f"Ollama judge unavailable ({llm_status.warning}); "
                         f"scan will degrade to no-judge"
                     )
+            elif external_grader:
+                # Surface the grader routing into the run config (non-secret
+                # fields only) so the scan container's load_config picks them up.
+                run_config.setdefault("bounds", {})
+                run_config["grader_provider"] = grader_provider
+                if bounds.get("grader_model"):
+                    run_config["grader_model"] = str(bounds["grader_model"])
+                if bounds.get("grader_base_url"):
+                    run_config["grader_base_url"] = str(bounds["grader_base_url"])
+                logger.info(
+                    f"AI attack {run_id}: external grader '{grader_provider}' "
+                    f"(key delivered ENV-only)"
+                )
 
             # Write the run config to the shared /tmp/redamon volume.
             config_dir = Path("/tmp/redamon")
@@ -1399,28 +1429,35 @@ class ContainerManager:
             with open(config_path, "w") as f:
                 json.dump(run_config, f)
 
+            # Scan container environment. The grader API key (when an external
+            # grader was selected) is injected here ENV-only as GRADER_API_KEY
+            # — it never enters run_config / the config JSON on /tmp/redamon.
+            scan_env = {
+                "PROJECT_ID": project_id,
+                "USER_ID": user_id,
+                "WEBAPP_API_URL": webapp_api_url,
+                # V3: operator-approved extra tool images (empty = strict
+                # shipped-only allowlist). Server-controlled; forwarded to the
+                # recon pipeline so air-gapped/private-registry deployments work.
+                "RECON_EXTRA_ALLOWED_IMAGES": os.environ.get("RECON_EXTRA_ALLOWED_IMAGES", ""),
+                "PYTHONUNBUFFERED": "1",
+                "AI_ATTACK_CONFIG": str(config_path),
+                "AI_ATTACK_RUN_ID": run_id,
+                "AI_ATTACK_TOOL": tool,
+                "NEO4J_URI": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
+                "NEO4J_USER": os.environ.get("NEO4J_USER", "neo4j"),
+                "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD", ""),
+                "INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", ""),
+            }
+            if external_grader and grader_api_key:
+                scan_env["GRADER_API_KEY"] = grader_api_key
+
             container = self.client.containers.run(
                 self.ai_attack_image,
                 name=container_name,
                 detach=True,
                 network_mode="host",
-                environment={
-                    "PROJECT_ID": project_id,
-                    "USER_ID": user_id,
-                    "WEBAPP_API_URL": webapp_api_url,
-                    # V3: operator-approved extra tool images (empty = strict
-                    # shipped-only allowlist). Server-controlled; forwarded to the
-                    # recon pipeline so air-gapped/private-registry deployments work.
-                    "RECON_EXTRA_ALLOWED_IMAGES": os.environ.get("RECON_EXTRA_ALLOWED_IMAGES", ""),
-                    "PYTHONUNBUFFERED": "1",
-                    "AI_ATTACK_CONFIG": str(config_path),
-                    "AI_ATTACK_RUN_ID": run_id,
-                    "AI_ATTACK_TOOL": tool,
-                    "NEO4J_URI": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
-                    "NEO4J_USER": os.environ.get("NEO4J_USER", "neo4j"),
-                    "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD", ""),
-                    "INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", ""),
-                },
+                environment=scan_env,
                 volumes={
                     "/tmp/redamon": {"bind": "/tmp/redamon", "mode": "rw"},
                     # Mount source for dev (no rebuild needed), like the other scanners.

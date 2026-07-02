@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **AI Gauntlet (promptfoo): external-grader fidelity — closed-model judge, zero-egress opt-out** ([adapters/grader.py](ai_attack_surface_scan/adapters/grader.py), [provider_config.py](ai_attack_surface_scan/adapters/promptfoo/provider_config.py), [adapter.py](ai_attack_surface_scan/adapters/promptfoo/adapter.py), [config.py](ai_attack_surface_scan/config.py), [normalizer.py](ai_attack_surface_scan/normalizer.py), [api.py](recon_orchestrator/api.py), [container_manager.py](recon_orchestrator/container_manager.py), [start/route.ts](webapp/src/app/api/ai-attack-surface/[projectId]/start/route.ts), [graders/route.ts](webapp/src/app/api/ai-attack-surface/[projectId]/graders/route.ts), [page.tsx](webapp/src/app/ai-attack-surface/page.tsx), [GRAPH.SCHEMA.md](readmes/GRAPH.SCHEMA.md)). The promptfoo grader/judge was architecturally locked to the on-demand local Ollama (and its default was downgraded to `qwen2.5:0.5b` in 5.1.1), so a 0.5B model graded jailbreak/toxicity success — a false-ASR source that undermines report accuracy. The grader can now use a closed/stronger model (OpenAI / Anthropic / OpenAI-compatible) instead, opt-in. Zero egress stays the **default**; external grading is an explicit per-launch consent (RoE-gated) with a UI egress warning. The grader API key is resolved server-side from the operator's existing `UserLlmProvider` and travels to the orchestrator only via an `X-Grader-Key` header — it is injected ENV-only into the scan container and is **never** written to the `/tmp/redamon` config JSON (unlike the target key today). Payload generation stays offline in both modes (`PROMPTFOO_DISABLE_REDTEAM_REMOTE_GENERATION=true`); only the grader's verdict traffic egresses. Every resulting `Vulnerability` is stamped with `ai_grader_provider` / `ai_grader_model` / `ai_grader_egress` (plus an evidence line) so a report can cite exactly what judged each ASR. garak/giskard/pyrit remain locked to local Ollama pending the same follow-on. Covered by new unit tests (grader provider builder, per-backend config emission, conditional egress strip, provenance) + orchestrator/webapp route tests (consent gate, ENV-only key transport).
+
+---
+
 ## [5.2.0] - 2026-06-30
 
 ### Added

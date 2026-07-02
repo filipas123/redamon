@@ -83,6 +83,16 @@ class RunConfig:
     # pyrit: optional custom attack objective (the harmful goal). Empty => the
     # selected attack's built-in objectives.
     objective: str = ""
+    # Grader/judge provider. "local-ollama" (default) keeps the historical
+    # zero-egress behaviour: the grader runs on the on-demand local Ollama model
+    # named in bounds.judge_model. Any other value ("openai" / "anthropic" /
+    # "openai-compatible") routes the grader to a closed model whose key is
+    # injected ENV-only as GRADER_API_KEY (or ANTHROPIC_API_KEY) by the
+    # orchestrator — it never travels in this config file. The non-secret grader
+    # fields below are persisted (needed to build the grader's provider block).
+    grader_provider: str = "local-ollama"
+    grader_model: str = ""      # when empty, falls back to bounds.judge_model
+    grader_base_url: str = ""   # openai-compatible base; ignored for hosted providers
 
 
 def load_config() -> RunConfig:
@@ -142,4 +152,11 @@ def load_config() -> RunConfig:
         target_purpose=str(data.get("target_purpose", "") or ""),
         strategies=data.get("strategies", []) or [],
         objective=str(data.get("objective", "") or ""),
+        # Grader routing. The orchestrator places these at the top level of the
+        # run config (mirroring judge_base_url); bounds is the secondary source
+        # since the UI / API sends them inside `bounds`. The grader API key is
+        # ENV-only (GRADER_API_KEY) and never appears here.
+        grader_provider=str(data.get("grader_provider", bounds_data.get("grader_provider", "local-ollama")) or "local-ollama"),
+        grader_model=str(data.get("grader_model", bounds_data.get("grader_model", "")) or ""),
+        grader_base_url=str(data.get("grader_base_url", bounds_data.get("grader_base_url", "")) or ""),
     )

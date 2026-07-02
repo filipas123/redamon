@@ -70,10 +70,32 @@ export default function AiAttackSurfacePage() {
   const [customModel, setCustomModel] = useState('')
   const [customErr, setCustomErr] = useState<string | null>(null)
 
+  // Grader fidelity (promptfoo). Default local-ollama keeps zero egress. An
+  // external grader egresses the grader's verdict traffic to a closed model
+  // whose key is resolved server-side from a stored UserLlmProvider and passed
+  // to the orchestrator via the X-Grader-Key header (never in the browser).
+  type Grader = { id: string; name: string; backend: string; providerType: string; modelIdentifier: string; baseUrl: string; hasKey: boolean }
+  const [graders, setGraders] = useState<Grader[]>([])
+  const [graderProvider, setGraderProvider] = useState<string>('local-ollama')
+  const [graderProviderId, setGraderProviderId] = useState<string>('')
+  const [graderModel, setGraderModel] = useState<string>('')
+  const [graderConsent, setGraderConsent] = useState(false)
+
+  const loadGraders = async (pid: string) => {
+    try {
+      const r = await fetch(`/api/ai-attack-surface/${pid}/graders`)
+      const d = await r.json()
+      setGraders(d.graders || [])
+    } catch {
+      setGraders([])
+    }
+  }
+
   useEffect(() => {
     if (projectId) {
       s.loadTargets()
       s.loadFindings()
+      loadGraders(projectId)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId])
@@ -162,10 +184,22 @@ export default function AiAttackSurfacePage() {
       mode: authMode, bearerToken,
       headerName: customHeaderName, headerValue: customHeaderValue,
     })
+    // Grader fidelity (promptfoo only this lap). Only send grader routing when
+    // the operator chose an external grader; otherwise the default local-ollama
+    // path is unchanged (and other tools ignore these fields entirely).
+    const graderBounds = (openCard.id === 'promptfoo' && graderProvider !== 'local-ollama' && graderProviderId !== '')
+      ? {
+          grader_provider: graderProvider,
+          grader_provider_id: graderProviderId,
+          grader_model: graderModel.trim() || undefined,
+          grader_consent: graderConsent,
+        }
+      : {}
+
     await s.launch({
       tool: openCard.id,
       targets: [...graphTargets, ...custom],
-      bounds: { trials, asr_threshold: asrThreshold, judge_model: judgeModel, max_turns: maxTurns, seed, parallelism, timeout: timeoutMin * 60 },
+      bounds: { trials, asr_threshold: asrThreshold, judge_model: judgeModel, max_turns: maxTurns, seed, parallelism, timeout: timeoutMin * 60, ...graderBounds },
       roe_confirmed: roeConfirmed,
       probes: Array.from(selectedProbes),
       strategies: openCard.id === 'promptfoo' ? Array.from(selectedStrategies) : undefined,
@@ -177,7 +211,11 @@ export default function AiAttackSurfacePage() {
 
   const totalTargets = selectedTargets.size + customTargets.length
   const running = s.run?.status === 'running' || s.run?.status === 'starting'
-  const canLaunch = totalTargets > 0 && selectedProbes.size > 0 && roeConfirmed && !s.launching && !running
+  // An external grader breaks the zero-egress guarantee, so require the
+  // operator's explicit per-launch consent (in addition to RoE).
+  const externalGrader = openCard?.id === 'promptfoo' && graderProvider !== 'local-ollama'
+  const graderReady = !externalGrader || (graderProviderId !== '' && graderConsent)
+  const canLaunch = totalTargets > 0 && selectedProbes.size > 0 && roeConfirmed && graderReady && !s.launching && !running
 
   return (
     <div className={styles.page}>
@@ -430,6 +468,66 @@ export default function AiAttackSurfacePage() {
                   ))}
                 </span>
               </label>
+            )}
+
+            {/* Grader fidelity (promptfoo only this lap). Default local-ollama
+                keeps zero egress; an external grader egresses the grader's
+                verdict traffic to a closed model (stronger judge → defensible
+                ASR), at the cost of sending attack transcripts off-box. */}
+            {openCard.id === 'promptfoo' && (
+              <div className={styles.authBlock}>
+                <span className={styles.authTitle}><SlidersHorizontal size={13} /> Grader (judge)</span>
+                <div className={styles.boundsRow} style={{ alignItems: 'center' }}>
+                  <label title="Default. The grader runs on the on-demand local Ollama — zero external egress.">
+                    <input type="radio" name="gradermode" checked={graderProvider === 'local-ollama'}
+                           onChange={() => { setGraderProvider('local-ollama'); setGraderProviderId(''); setGraderConsent(false) }} />
+                    Local Ollama (zero egress)
+                  </label>
+                  <label title="Use a closed/stronger model as the judge. The grader key is resolved server-side from a stored provider; it never reaches the browser.">
+                    <input type="radio" name="gradermode" checked={graderProvider !== 'local-ollama'}
+                           onChange={() => setGraderProvider('external')} />
+                    External grader
+                  </label>
+                </div>
+                {graderProvider !== 'local-ollama' && (
+                  <>
+                    <div className={styles.boundsRow} style={{ alignItems: 'center', marginTop: 6 }}>
+                      <select value={graderProviderId}
+                              onChange={(e) => {
+                                const id = e.target.value
+                                setGraderProviderId(id)
+                                const g = graders.find((x) => x.id === id)
+                                if (g) {
+                                  setGraderProvider(g.backend)
+                                  if (!graderModel.trim()) setGraderModel(g.modelIdentifier || '')
+                                }
+                              }}>
+                        <option value="">Select a stored provider…</option>
+                        {graders.map((g) => (
+                          <option key={g.id} value={g.id} disabled={!g.hasKey}>
+                            {g.name} ({g.providerType}){g.hasKey ? '' : ' — no key'}
+                          </option>
+                        ))}
+                      </select>
+                      <label title="The grader model id sent to the provider (e.g. gpt-4o, claude-opus-4-6).">
+                        Model<input type="text" value={graderModel}
+                              onChange={(e) => setGraderModel(e.target.value)} /></label>
+                    </div>
+                    {graders.length === 0 && (
+                      <p className={styles.err}>No external grader providers configured. Add an OpenAI / Anthropic / OpenAI-compatible provider in Settings.</p>
+                    )}
+                    <p className={styles.hint} style={{ color: '#b45309', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <AlertTriangle size={13} />
+                      An external grader sends attack transcripts to the chosen provider — this breaks zero egress. Findings are stamped with the grader used.
+                    </p>
+                    <label className={styles.row} style={{ marginTop: 6 }}>
+                      <input type="checkbox" checked={graderConsent}
+                             onChange={(e) => setGraderConsent(e.target.checked)} />
+                      <span className={styles.rowMain}>Allow external grader for this run</span>
+                    </label>
+                  </>
+                )}
+              </div>
             )}
 
             {/* pyrit: optional custom objective (the specific harmful goal). */}

@@ -124,6 +124,9 @@ def run_tool(cfg, targets) -> list:
                     api_key=cfg.api_key or None,
                     auth_header=cfg.auth_header or None,
                     auth_scheme=cfg.auth_scheme or None,
+                    grader_provider=cfg.grader_provider or "local-ollama",
+                    grader_model=cfg.grader_model or None,
+                    grader_base_url=cfg.grader_base_url or None,
                 ))
             except Exception as e:
                 log.exception(f"promptfoo failed on {t.url}: {e}")
