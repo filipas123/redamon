@@ -43,7 +43,18 @@ opt-in. garak/giskard/pyrit are a documented follow-on (same pattern).
    provider/model stamped on each `Vulnerability` + evidence line.
 4. **Grader backends**: `local-ollama` (default, unchanged) | `openai` | `anthropic` |
    `openai-compatible`.
-5. **Sequencing vs heuristic**: ship the closed-model grader first (ground truth +
+5. **Grader key transport (resolved from code)**: the key travels out-of-band via an
+   **`X-Grader-Key` HTTP header** on the webapp→orchestrator call (mirrors the existing
+   `X-Orchestrator-Key` that `orchestratorFetch` injects). The orchestrator reads
+   `request.headers.get("x-grader-key")`, **never** adds it to `run_config` (so it never
+   reaches the `/tmp/redamon` config JSON that `container_manager.py:1399` writes and the
+   scan container reads back), and injects it straight into the scan container as ENV
+   `GRADER_API_KEY` (or `ANTHROPIC_API_KEY`) in the `containers.run(environment=...)` dict.
+   Non-secret grader fields (`grader_provider`/`grader_model`/`grader_base_url`) DO travel
+   in the JSON body / `bounds` and land in the config file (needed to build the promptfoo
+   provider block). This is strictly more secure than today's target key, which IS persisted
+   to `/tmp/redamon` (`api.py:1057` → `run_config["api_key"]` → `container_manager.py:1399`).
+6. **Sequencing vs heuristic**: ship the closed-model grader first (ground truth +
    provenance). A local gold-corpus + ML heuristic grader is a **follow-on phase**, gated
    on a measured agreement test vs the closed judge — not a substitute (it can't bootstrap
    its own labels; accuracy is bound by label fidelity, not disk capacity).
@@ -52,9 +63,11 @@ opt-in. garak/giskard/pyrit are a documented follow-on (same pattern).
 
 UI `page.tsx` → `useAiAttackSurface.launch({..., grader_*})` →
 `POST /api/ai-attack-surface/[projectId]/start` (webapp resolves grader key from
-`UserLlmProvider`) → orchestrator `/ai-attack-surface/[projectId]/start` →
-`start_ai_attack_surface` (skips `local_llm_manager.ensure_up` when grader != local;
-passes grader key as ENV) → scan container (`AI_ATTACK_CONFIG` + grader key ENV) →
+`UserLlmProvider`, sends it in an **`X-Grader-Key` header**, non-secret grader fields in
+the JSON body) → orchestrator `/ai-attack-surface/[projectId]/start` (reads key from
+header, keeps it out of `run_config`) → `start_ai_attack_surface` (skips
+`local_llm_manager.ensure_up` when grader != local; injects key as ENV) → scan container
+(`AI_ATTACK_CONFIG` carries only non-secret grader fields + `GRADER_API_KEY` ENV) →
 `config.load_config` → `main.run_tool` → `promptfoo adapter.run` →
 `provider_config.build_config` emits the right `redteam.provider` → `adapter._invoke`
 conditionally stops stripping the grader key (keeps payload-generation offline).
@@ -92,25 +105,30 @@ conditionally stops stripping the grader key (keeps payload-generation offline).
 - `readmes/GRAPH.SCHEMA.md`: document the three new `Vulnerability` properties.
 
 ### 4. Orchestrator
-- `recon_orchestrator/container_manager.py:start_ai_attack_surface`: when
-  `bounds.grader_provider != "local-ollama"`, skip `local_llm_manager.ensure_up` / lease;
-  set `run_config["grader_base_url"]` from the resolved provider; pass `GRADER_API_KEY`
-  (and `ANTHROPIC_API_KEY` when anthropic) into the scan container `environment`.
-- `recon_orchestrator/api.py` (the start route): accept + forward `bounds.grader_*`;
-  enforce RoE when an external grader is requested (the launch is already RoE-gated; the
-  consent flag below is the new gate).
+- `recon_orchestrator/api.py` (the start route): accept `bounds.grader_*` (non-secret) in
+  the body. Read the grader key from `request.headers.get("x-grader-key")` — **do not** add
+  it to `run_config` (keeps it out of the `/tmp/redamon` config JSON). Pass it as a new
+  `grader_api_key` parameter to `start_ai_attack_surface`. Enforce RoE when an external
+  grader is requested (the consent flag is the new gate; the launch is already RoE-gated).
+- `recon_orchestrator/container_manager.py:start_ai_attack_surface`: take the new
+  `grader_api_key` param. When `bounds.grader_provider != "local-ollama"`, skip
+  `local_llm_manager.ensure_up` / lease; set `run_config["grader_base_url"]` from the
+  resolved provider; inject `GRADER_API_KEY` (or `ANTHROPIC_API_KEY` when anthropic) into
+  the scan container `environment` dict at the existing env block (`:1407`). Never put the
+  key in `run_config`/`config_path`.
 
 ### 5. Webapp (server-side key resolution)
 - `webapp/src/app/api/ai-attack-surface/[projectId]/start/route.ts`: accept
   `body.grader_provider`, `body.grader_provider_id` (the `UserLlmProvider.id`). When
-  external, `prisma.userLlmProvider.findUnique` → resolve `apiKey`/`baseUrl`/
-  `providerType`; send `grader_provider`/`grader_model`/`grader_base_url` to the
-  orchestrator and the **key out of band via a server-only channel** (orchestrator env or
-  a one-shot header — match whatever `orchestratorFetch` already does for secrets; do NOT
-  put the key in the JSON body that the browser sent). Reject if the provider isn't owned
-  by `project.userId`.
-- Add a route test: external grader without a valid owned provider → 400; key never
-  echoed back in the response.
+  external, `prisma.userLlmProvider.findUnique({where:{id, userId: project.userId}})` →
+  resolve `apiKey`/`baseUrl`/`providerType`. Forward `grader_provider`/`grader_model`/
+  `grader_base_url` in the JSON body to the orchestrator, but pass the **key in an
+  `X-Grader-Key` header** on the `orchestratorFetch` call (the wrapper already merges
+  headers; add it alongside `X-Orchestrator-Key`). Do NOT put the key in the body the
+  browser sent. Reject (400) if the provider isn't owned by `project.userId` or the
+  `providerType` isn't external-capable.
+- Add a route test: external grader without a valid owned provider → 400; key never echoed
+  back in the response; assert the orchestrator call's headers carry `X-Grader-Key`.
 
 ### 6. UI
 - `webapp/src/lib/aiAttackSurface.ts`: extend `AiAttackRunState`/launch payload with
@@ -161,11 +179,24 @@ RAID — solves capacity, not the inference-throughput that fidelity actually ne
   grading runs end-to-end with a closed model.
 - Graph schema doc updated; new properties queryable via the NL→Cypher agent prompt.
 
+## Resolved design point — grader key transport
+
+The transport was originally an open question; it is now resolved by code inspection and
+folded into Decision 5 and Tasks 4–5. Summary for the implementation agent:
+
+- `orchestratorFetch` (`webapp/src/lib/orchestrator.ts`) injects `X-Orchestrator-Key`; add
+  `X-Grader-Key` the same way (server-side only).
+- The orchestrator start route (`api.py:1030`) reads `request.headers.get("x-grader-key")`
+  (FastAPI supports this directly; no Pydantic model change for the secret).
+- The key never enters `run_config`, so `container_manager.py:1399` (`json.dump(run_config)`)
+  never writes it to `/tmp/redamon`, and the scan container never reads it from the config
+  file. It arrives only via the `environment` dict in `containers.run(...)`.
+- Contrast: today's target `api_key` IS persisted to `/tmp/redamon` via `run_config["api_key"]`
+  (`api.py:1057` → `container_manager.py:1399`). The grader key deliberately avoids that
+  weaker path. (A separate, optional cleanup to take the target key off disk is out of scope
+  here to keep the change minimal and the diff reviewable.)
+
 ## Open questions (for implementation agent)
 
-- Exact channel for passing the server-resolved grader key to the orchestrator without it
-  landing in the forwarded JSON body — confirm against how `orchestratorFetch` / the
-  `ORCHESTRATOR_API_KEY` is handled today (prefer an orchestrator-side env injection the
-  scan container inherits, over a header the webapp route sends).
 - Whether the egress consent should also be recorded as a project-level audit event
-  (recommended) — confirm the audit surface used elsewhere.
+  (recommended) — confirm the audit surface used elsewhere before adding one.
